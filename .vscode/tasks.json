@@ -9,6 +9,8 @@
 			"command": "~/.cargo/bin/cargo", // note: full path to the cargo
 			"args": [
 				"run",
+				"--features",
+				"bevy/dynamic_linking"
 				// "--release",
 				// "--",
 				// "arg1"

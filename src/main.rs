@@ -1,6 +1,7 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use bevy::{
+    ecs::schedule::ExecutorKind,
     prelude::*,
     render::{
         settings::{Backends, RenderCreation, WgpuSettings},
@@ -14,6 +15,9 @@ fn main() {
         .insert_resource(ClearColor(Color::WHITE))
         .init_resource::<MousePosition>()
         .add_plugins(Defaults)
+        .edit_schedule(Update, |schedule| {
+            schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+        })
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -35,6 +39,11 @@ struct MousePosition(Vec2);
 #[derive(Resource)]
 struct Config {
     running: bool,
+}
+
+#[derive(Resource)]
+struct Tiles {
+    tiles: HashMap<String, bool>,
 }
 
 #[derive(Component)]
@@ -73,9 +82,12 @@ impl Plugin for Defaults {
 fn setup(mut cmds: Commands, asset_server: Res<AssetServer>) {
     cmds.spawn((Camera2dBundle::default(), MainCamera));
     cmds.spawn(TileTime {
-        timer: Timer::new(Duration::from_secs_f32(0.5), TimerMode::Repeating),
+        timer: Timer::new(Duration::from_secs_f32(1.0), TimerMode::Repeating),
     });
     cmds.insert_resource(Config { running: false });
+    cmds.insert_resource(Tiles {
+        tiles: HashMap::new(),
+    });
 
     let h_bars = WINDOW_WIDTH / (CELL_SIZE as i32);
     for i in 0..=h_bars {
@@ -174,7 +186,12 @@ fn track_mouse_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     mut q_indicator: Query<&mut Transform, With<CursorIndicator>>,
+    config: Res<Config>,
 ) {
+    if config.running {
+        return;
+    }
+
     let (camera, camera_transform) = q_camera.single();
 
     let window = q_window.single();
@@ -195,6 +212,7 @@ fn place_tile_system(
     buttons: Res<Input<MouseButton>>,
     mut cmds: Commands,
     config: Res<Config>,
+    mut tiles: ResMut<Tiles>,
 ) {
     if config.running {
         return;
@@ -222,6 +240,9 @@ fn place_tile_system(
             }
         };
 
+        let pos_x = ((x / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(x)) as f32;
+        let pos_y = ((y / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(y)) as f32;
+
         cmds.spawn((
             SpriteBundle {
                 sprite: Sprite {
@@ -229,20 +250,18 @@ fn place_tile_system(
                     custom_size: Some(Vec2::new(CELL_SIZE, CELL_SIZE)),
                     ..default()
                 },
-                transform: Transform::from_translation(Vec3::new(
-                    ((x / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(x)) as f32,
-                    ((y / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(y)) as f32,
-                    0.0,
-                )),
+                transform: Transform::from_translation(Vec3::new(pos_x, pos_y, 0.0)),
                 ..default()
             },
             Tile,
         ));
+
+        tiles.tiles.insert(format!("{}:{}", pos_x, pos_y), true);
     }
 }
 
 fn move_tiles_system(
-    mut q_tiles: Query<(Entity, &mut Transform), With<Tile>>,
+    q_tiles: Query<(Entity, &Transform), With<Tile>>,
     mut q_timer: Query<&mut TileTime>,
     time: Res<Time>,
     mut cmds: Commands,
@@ -257,15 +276,75 @@ fn move_tiles_system(
     tile_timer.timer.tick(time.delta());
 
     if tile_timer.timer.finished() {
-        for (e, mut transform) in q_tiles.iter_mut() {
-            let half_width = WINDOW_WIDTH / 2;
-            if (transform.translation.x as i32) < half_width - (CELL_SIZE as i32) {
-                transform.translation += Vec3::new(CELL_SIZE, 0.0, 0.0);
-            } else {
+        let mut tiles = vec![];
+
+        for (_, transform) in &q_tiles {
+            tiles.push(transform);
+        }
+
+        for (e, transform) in &q_tiles {
+            let neighbors = tile_neighbors(&transform.translation, &tiles);
+            if neighbors < 2 || neighbors > 3 {
                 cmds.entity(e).despawn();
+            }
+
+            let dead_tiles = get_dead_tiles(&transform.translation, &tiles);
+
+            for dt in &dead_tiles {
+                let n = tile_neighbors(dt, &tiles);
+                if n == 3 {
+                    cmds.spawn((
+                        SpriteBundle {
+                            sprite: Sprite {
+                                color: Color::BLACK,
+                                custom_size: Some(Vec2::new(CELL_SIZE, CELL_SIZE)),
+                                ..default()
+                            },
+                            transform: Transform::from_translation(Vec3::new(dt.x, dt.y, 0.0)),
+                            ..default()
+                        },
+                        Tile,
+                    ));
+                }
             }
         }
     }
+}
+
+fn tile_neighbors(tile: &Vec3, tiles: &Vec<&Transform>) -> i32 {
+    let Vec3 { x, y, z } = tile;
+    let is_pos_equal = |pos| tiles.iter().any(|&&t| t.translation == pos);
+
+    let n = is_pos_equal(Vec3::new(*x, *y + CELL_SIZE, *z)) as i32;
+    let s = is_pos_equal(Vec3::new(*x, *y - CELL_SIZE, *z)) as i32;
+    let w = is_pos_equal(Vec3::new(*x - CELL_SIZE, *y, *z)) as i32;
+    let e = is_pos_equal(Vec3::new(*x + CELL_SIZE, *y, *z)) as i32;
+    let ne = is_pos_equal(Vec3::new(*x + CELL_SIZE, *y + CELL_SIZE, *z)) as i32;
+    let nw = is_pos_equal(Vec3::new(*x - CELL_SIZE, *y + CELL_SIZE, *z)) as i32;
+    let se = is_pos_equal(Vec3::new(*x + CELL_SIZE, *y - CELL_SIZE, *z)) as i32;
+    let sw = is_pos_equal(Vec3::new(*x - CELL_SIZE, *y - CELL_SIZE, *z)) as i32;
+
+    n + s + w + e + ne + nw + se + sw
+}
+
+fn get_dead_tiles(tile: &Vec3, live_tiles: &Vec<&Transform>) -> Vec<Vec3> {
+    let Vec3 { x, y, z } = tile;
+
+    let neighbors = vec![
+        Vec3::new(*x, *y + CELL_SIZE, *z),
+        Vec3::new(*x, *y - CELL_SIZE, *z),
+        Vec3::new(*x - CELL_SIZE, *y, *z),
+        Vec3::new(*x + CELL_SIZE, *y, *z),
+        Vec3::new(*x + CELL_SIZE, *y + CELL_SIZE, *z),
+        Vec3::new(*x - CELL_SIZE, *y + CELL_SIZE, *z),
+        Vec3::new(*x + CELL_SIZE, *y - CELL_SIZE, *z),
+        Vec3::new(*x - CELL_SIZE, *y - CELL_SIZE, *z),
+    ];
+
+    neighbors
+        .into_iter()
+        .filter(|n| live_tiles.iter().any(|t| t.translation != *n))
+        .collect()
 }
 
 fn button_system(
