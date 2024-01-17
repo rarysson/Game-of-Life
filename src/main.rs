@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use bevy::{
-    ecs::schedule::ExecutorKind,
+    core_pipeline::clear_color::ClearColorConfig,
     prelude::*,
     render::{
         settings::{Backends, RenderCreation, WgpuSettings},
@@ -10,68 +10,7 @@ use bevy::{
     window::PrimaryWindow,
 };
 
-fn main() {
-    App::new()
-        .insert_resource(ClearColor(Color::WHITE))
-        .init_resource::<MousePosition>()
-        .add_plugins(Defaults)
-        .edit_schedule(Update, |schedule| {
-            schedule.set_executor_kind(ExecutorKind::SingleThreaded);
-        })
-        .add_systems(Startup, setup)
-        .add_systems(
-            Update,
-            (
-                track_mouse_system,
-                place_tile_system,
-                move_tiles_system,
-                button_system,
-            ),
-        )
-        .run();
-}
-
-pub struct Defaults;
-
-#[derive(Resource, Default)]
-struct MousePosition(Vec2);
-
-#[derive(Resource)]
-struct Config {
-    running: bool,
-}
-
-struct Something {
-    alive: bool,
-    entity: Entity,
-}
-
-#[derive(Resource)]
-struct Tiles {
-    tiles: HashMap<String, Something>,
-}
-
-#[derive(Component)]
-struct MainCamera;
-
-#[derive(Component)]
-struct CursorIndicator;
-
-#[derive(Component)]
-struct Tile;
-
-#[derive(Component)]
-struct TileTime {
-    timer: Timer,
-}
-
-#[derive(Component)]
-struct GridLine;
-
-const CELL_SIZE: f32 = 8.0;
-const WINDOW_WIDTH: i32 = 1280;
-const WINDOW_HEIGHT: i32 = 720;
-const NORMAL_BUTTON: Color = Color::rgb(0.15, 0.15, 0.15);
+struct Defaults;
 
 impl Plugin for Defaults {
     fn build(&self, app: &mut App) {
@@ -84,15 +23,81 @@ impl Plugin for Defaults {
     }
 }
 
+fn main() {
+    App::new()
+        .add_plugins(Defaults)
+        .add_systems(Startup, setup)
+        .add_systems(
+            Update,
+            (
+                track_mouse_system,
+                place_tile_system,
+                population_system,
+                start_game_system,
+            ),
+        )
+        .run();
+}
+
+struct CellData {
+    alive: bool,
+    entity: Entity,
+}
+
+#[derive(Resource, Default)]
+struct MousePosition(Vec2);
+
+#[derive(Resource)]
+struct GameState {
+    running: bool,
+}
+
+#[derive(Resource)]
+struct Grid {
+    cells: HashMap<String, CellData>,
+}
+
+#[derive(Resource)]
+struct PopulationTimer {
+    timer: Timer,
+}
+
+#[derive(Component)]
+struct MainCamera;
+
+#[derive(Component)]
+struct CursorIndicator;
+
+#[derive(Component)]
+struct Cell;
+
+#[derive(Component)]
+struct GridLine;
+
+const CELL_SIZE: f32 = 8.0;
+const WINDOW_WIDTH: i32 = 1280;
+const WINDOW_HEIGHT: i32 = 720;
+
 fn setup(mut cmds: Commands, asset_server: Res<AssetServer>) {
-    cmds.spawn((Camera2dBundle::default(), MainCamera));
-    cmds.spawn(TileTime {
-        timer: Timer::new(Duration::from_secs_f32(0.5), TimerMode::Repeating),
+    cmds.init_resource::<MousePosition>();
+
+    cmds.insert_resource(GameState { running: false });
+    cmds.insert_resource(Grid {
+        cells: HashMap::new(),
     });
-    cmds.insert_resource(Config { running: false });
-    cmds.insert_resource(Tiles {
-        tiles: HashMap::new(),
+    cmds.insert_resource(PopulationTimer {
+        timer: Timer::new(Duration::from_secs_f32(0.15), TimerMode::Repeating),
     });
+
+    cmds.spawn((
+        Camera2dBundle {
+            camera_2d: Camera2d {
+                clear_color: ClearColorConfig::Custom(Color::WHITE),
+            },
+            ..Default::default()
+        },
+        MainCamera,
+    ));
 
     let h_bars = WINDOW_WIDTH / (CELL_SIZE as i32);
     for i in 0..=h_bars {
@@ -163,14 +168,12 @@ fn setup(mut cmds: Commands, asset_server: Res<AssetServer>) {
                     width: Val::Px(150.0),
                     height: Val::Px(65.0),
                     border: UiRect::all(Val::Px(5.0)),
-                    // horizontally center child text
                     justify_content: JustifyContent::Center,
-                    // vertically center child text
                     align_items: AlignItems::Center,
                     ..default()
                 },
                 border_color: BorderColor(Color::BLACK),
-                background_color: NORMAL_BUTTON.into(),
+                background_color: Color::rgb(0.15, 0.15, 0.15).into(),
                 ..default()
             })
             .with_children(|parent| {
@@ -187,20 +190,20 @@ fn setup(mut cmds: Commands, asset_server: Res<AssetServer>) {
 }
 
 fn track_mouse_system(
-    mut mouse_position: ResMut<MousePosition>,
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
-    mut q_indicator: Query<&mut Transform, With<CursorIndicator>>,
-    config: Res<Config>,
+    mut q_cursor_indicator: Query<&mut Transform, With<CursorIndicator>>,
+    mut mouse_position: ResMut<MousePosition>,
+    game_state: Res<GameState>,
 ) {
-    if config.running {
+    if game_state.running {
         return;
     }
 
     let (camera, camera_transform) = q_camera.single();
 
     let window = q_window.single();
-    let mut indicator = q_indicator.single_mut();
+    let mut cursor_indicator = q_cursor_indicator.single_mut();
 
     if let Some(world_position) = window
         .cursor_position()
@@ -208,22 +211,22 @@ fn track_mouse_system(
         .map(|ray| ray.origin.truncate())
     {
         mouse_position.0 = world_position;
-        indicator.translation = Vec3::new(world_position.x, world_position.y, 0.0)
+        cursor_indicator.translation = Vec3::new(world_position.x, world_position.y, 0.0)
     }
 }
 
 fn place_tile_system(
-    mouse_position: Res<MousePosition>,
-    buttons: Res<Input<MouseButton>>,
     mut cmds: Commands,
-    config: Res<Config>,
-    mut tiles: ResMut<Tiles>,
+    mouse_position: Res<MousePosition>,
+    btn: Res<Input<MouseButton>>,
+    game_state: Res<GameState>,
+    mut grid: ResMut<Grid>,
 ) {
-    if config.running {
+    if game_state.running {
         return;
     }
 
-    if buttons.just_pressed(MouseButton::Left) {
+    if btn.just_pressed(MouseButton::Left) {
         let x = mouse_position.0.x;
         let y = mouse_position.0.y;
 
@@ -245,8 +248,8 @@ fn place_tile_system(
             }
         };
 
-        let pos_x = ((x / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(x)) as f32;
-        let pos_y = ((y / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(y)) as f32;
+        let x = ((x / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(x)) as f32;
+        let y = ((y / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(y)) as f32;
 
         let entity = cmds
             .spawn((
@@ -256,16 +259,16 @@ fn place_tile_system(
                         custom_size: Some(Vec2::new(CELL_SIZE, CELL_SIZE)),
                         ..default()
                     },
-                    transform: Transform::from_translation(Vec3::new(pos_x, pos_y, 0.0)),
+                    transform: Transform::from_translation(Vec3::new(x, y, 0.0)),
                     ..default()
                 },
-                Tile,
+                Cell,
             ))
             .id();
 
-        tiles.tiles.insert(
-            format!("{}:{}", pos_x, pos_y),
-            Something {
+        grid.cells.insert(
+            format!("{}:{}", x, y),
+            CellData {
                 alive: true,
                 entity,
             },
@@ -273,58 +276,59 @@ fn place_tile_system(
     }
 }
 
-fn move_tiles_system(
-    mut q_tiles: Query<(&Transform, &mut Visibility), With<Tile>>,
-    mut q_timer: Query<&mut TileTime>,
-    time: Res<Time>,
+fn population_system(
     mut cmds: Commands,
-    config: Res<Config>,
-    mut grid: ResMut<Tiles>,
+    mut q_cells: Query<(&Transform, &mut Visibility), With<Cell>>,
+    clock: Res<Time>,
+    game_state: Res<GameState>,
+    mut grid: ResMut<Grid>,
+    mut population_timer: ResMut<PopulationTimer>,
 ) {
-    if !config.running {
+    if !game_state.running {
         return;
     }
 
-    let mut tile_timer = q_timer.single_mut();
+    population_timer.timer.tick(clock.delta());
 
-    tile_timer.timer.tick(time.delta());
+    if population_timer.timer.finished() {
+        let mut alive_cells = HashMap::new();
 
-    if tile_timer.timer.finished() {
-        let mut alive_tiles = HashMap::new();
-
-        for (key, data) in &grid.tiles {
-            if data.alive {
-                alive_tiles.insert(
+        for (key, cell) in &grid.cells {
+            if cell.alive {
+                alive_cells.insert(
                     key.clone(),
-                    Something {
-                        alive: data.alive,
-                        entity: data.entity,
+                    CellData {
+                        alive: cell.alive,
+                        entity: cell.entity,
                     },
                 );
             }
         }
 
-        for (transform, mut visibility) in &mut q_tiles {
-            let neighbors = tile_neighbors(&transform.translation, &alive_tiles);
-            let key = format!("{}:{}", transform.translation.x, transform.translation.y);
+        for (cell_transform, mut cell_visibility) in &mut q_cells {
+            let neighbors = count_cell_neighbors(&cell_transform.translation, &alive_cells);
+            let key = format!(
+                "{}:{}",
+                cell_transform.translation.x, cell_transform.translation.y
+            );
 
             if neighbors < 2 || neighbors > 3 {
-                if let Some(data) = grid.tiles.get_mut(&key) {
-                    data.alive = false;
-                    *visibility = Visibility::Hidden;
+                if let Some(cell) = grid.cells.get_mut(&key) {
+                    cell.alive = false;
+                    *cell_visibility = Visibility::Hidden;
                 }
             }
 
-            let dead_tiles = get_dead_tiles(&transform.translation, &alive_tiles);
+            let dead_cells = get_dead_cells(&cell_transform.translation, &alive_cells);
 
-            for dt in &dead_tiles {
-                let n = tile_neighbors(dt, &alive_tiles);
-                let k = format!("{}:{}", dt.x, dt.y);
+            for dead_cell_position in &dead_cells {
+                let neighbors = count_cell_neighbors(dead_cell_position, &alive_cells);
+                let key = format!("{}:{}", dead_cell_position.x, dead_cell_position.y);
 
-                if n == 3 {
-                    if let Some(data) = grid.tiles.get_mut(&k) {
-                        data.alive = true;
-                        cmds.entity(data.entity).insert(Visibility::Visible);
+                if neighbors == 3 {
+                    if let Some(cell) = grid.cells.get_mut(&key) {
+                        cell.alive = true;
+                        cmds.entity(cell.entity).insert(Visibility::Visible);
                     } else {
                         let entity = cmds
                             .spawn((
@@ -335,16 +339,19 @@ fn move_tiles_system(
                                         ..default()
                                     },
                                     transform: Transform::from_translation(Vec3::new(
-                                        dt.x, dt.y, 0.0,
+                                        dead_cell_position.x,
+                                        dead_cell_position.y,
+                                        0.0,
                                     )),
                                     ..default()
                                 },
-                                Tile,
+                                Cell,
                             ))
                             .id();
-                        grid.tiles.insert(
-                            k,
-                            Something {
+
+                        grid.cells.insert(
+                            key,
+                            CellData {
                                 alive: true,
                                 entity,
                             },
@@ -356,35 +363,33 @@ fn move_tiles_system(
     }
 }
 
-fn tile_neighbors(tile: &Vec3, alive_tiles: &HashMap<String, Something>) -> i32 {
-    let Vec3 { x, y, .. } = tile;
-    let is_pos_alive = |x, y| {
-        let key = format!("{}:{}", x, y);
-        if let Some(data) = alive_tiles.get(&key) {
-            data.alive
+fn count_cell_neighbors(cell_position: &Vec3, alive_cells: &HashMap<String, CellData>) -> i32 {
+    let Vec3 { x, y, .. } = cell_position;
+    let is_cell_alive = |x, y| {
+        if let Some(cell) = alive_cells.get(&format!("{}:{}", x, y)) {
+            cell.alive
         } else {
             false
         }
     };
 
-    let n = is_pos_alive(*x, *y + CELL_SIZE) as i32;
-    let s = is_pos_alive(*x, *y - CELL_SIZE) as i32;
-    let w = is_pos_alive(*x - CELL_SIZE, *y) as i32;
-    let e = is_pos_alive(*x + CELL_SIZE, *y) as i32;
-    let ne = is_pos_alive(*x + CELL_SIZE, *y + CELL_SIZE) as i32;
-    let nw = is_pos_alive(*x - CELL_SIZE, *y + CELL_SIZE) as i32;
-    let se = is_pos_alive(*x + CELL_SIZE, *y - CELL_SIZE) as i32;
-    let sw = is_pos_alive(*x - CELL_SIZE, *y - CELL_SIZE) as i32;
+    let n = is_cell_alive(*x, *y + CELL_SIZE) as i32;
+    let s = is_cell_alive(*x, *y - CELL_SIZE) as i32;
+    let w = is_cell_alive(*x - CELL_SIZE, *y) as i32;
+    let e = is_cell_alive(*x + CELL_SIZE, *y) as i32;
+    let ne = is_cell_alive(*x + CELL_SIZE, *y + CELL_SIZE) as i32;
+    let nw = is_cell_alive(*x - CELL_SIZE, *y + CELL_SIZE) as i32;
+    let se = is_cell_alive(*x + CELL_SIZE, *y - CELL_SIZE) as i32;
+    let sw = is_cell_alive(*x - CELL_SIZE, *y - CELL_SIZE) as i32;
 
     n + s + w + e + ne + nw + se + sw
 }
 
-fn get_dead_tiles(tile: &Vec3, alive_tiles: &HashMap<String, Something>) -> Vec<Vec3> {
-    let Vec3 { x, y, z } = tile;
-    let is_pos_alive = |x, y| {
-        let key = format!("{}:{}", x, y);
-        if let Some(data) = alive_tiles.get(&key) {
-            data.alive
+fn get_dead_cells(cell_position: &Vec3, alive_cells: &HashMap<String, CellData>) -> Vec<Vec3> {
+    let Vec3 { x, y, z } = cell_position;
+    let is_cell_alive = |x, y| {
+        if let Some(cell) = alive_cells.get(&format!("{}:{}", x, y)) {
+            cell.alive
         } else {
             false
         }
@@ -403,30 +408,29 @@ fn get_dead_tiles(tile: &Vec3, alive_tiles: &HashMap<String, Something>) -> Vec<
 
     neighbors
         .into_iter()
-        .filter(|n| !is_pos_alive(n.x, n.y))
+        .filter(|n| !is_cell_alive(n.x, n.y))
         .collect()
 }
 
-fn button_system(
-    mut interaction_query: Query<(Entity, &Interaction)>,
-    q_tile_lines: Query<(Entity, &GridLine)>,
+fn start_game_system(
     mut cmds: Commands,
-    mut config: ResMut<Config>,
-    q_indicator: Query<Entity, With<CursorIndicator>>,
+    q_grid_lines: Query<Entity, With<GridLine>>,
+    q_cursor_indicator: Query<Entity, With<CursorIndicator>>,
+    mut q_interaction: Query<(Entity, &Interaction)>,
+    mut game_state: ResMut<GameState>,
 ) {
-    for (e, interaction) in &mut interaction_query {
+    for (entity, interaction) in &mut q_interaction {
         match *interaction {
             Interaction::Pressed => {
-                cmds.entity(e).despawn_recursive();
+                cmds.entity(entity).despawn_recursive();
 
-                for (e_line, _) in q_tile_lines.iter() {
+                for e_line in q_grid_lines.iter() {
                     cmds.entity(e_line).despawn();
                 }
 
-                let e_indicator = q_indicator.single();
-                cmds.entity(e_indicator).despawn();
+                cmds.entity(q_cursor_indicator.single()).despawn();
 
-                config.running = true;
+                game_state.running = true;
             }
             _ => (),
         }
