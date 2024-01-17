@@ -41,9 +41,14 @@ struct Config {
     running: bool,
 }
 
+struct Something {
+    alive: bool,
+    entity: Entity,
+}
+
 #[derive(Resource)]
 struct Tiles {
-    tiles: HashMap<String, bool>,
+    tiles: HashMap<String, Something>,
 }
 
 #[derive(Component)]
@@ -82,7 +87,7 @@ impl Plugin for Defaults {
 fn setup(mut cmds: Commands, asset_server: Res<AssetServer>) {
     cmds.spawn((Camera2dBundle::default(), MainCamera));
     cmds.spawn(TileTime {
-        timer: Timer::new(Duration::from_secs_f32(1.0), TimerMode::Repeating),
+        timer: Timer::new(Duration::from_secs_f32(0.5), TimerMode::Repeating),
     });
     cmds.insert_resource(Config { running: false });
     cmds.insert_resource(Tiles {
@@ -243,29 +248,38 @@ fn place_tile_system(
         let pos_x = ((x / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(x)) as f32;
         let pos_y = ((y / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(y)) as f32;
 
-        cmds.spawn((
-            SpriteBundle {
-                sprite: Sprite {
-                    color: Color::BLACK,
-                    custom_size: Some(Vec2::new(CELL_SIZE, CELL_SIZE)),
+        let entity = cmds
+            .spawn((
+                SpriteBundle {
+                    sprite: Sprite {
+                        color: Color::BLACK,
+                        custom_size: Some(Vec2::new(CELL_SIZE, CELL_SIZE)),
+                        ..default()
+                    },
+                    transform: Transform::from_translation(Vec3::new(pos_x, pos_y, 0.0)),
                     ..default()
                 },
-                transform: Transform::from_translation(Vec3::new(pos_x, pos_y, 0.0)),
-                ..default()
-            },
-            Tile,
-        ));
+                Tile,
+            ))
+            .id();
 
-        tiles.tiles.insert(format!("{}:{}", pos_x, pos_y), true);
+        tiles.tiles.insert(
+            format!("{}:{}", pos_x, pos_y),
+            Something {
+                alive: true,
+                entity,
+            },
+        );
     }
 }
 
 fn move_tiles_system(
-    q_tiles: Query<(Entity, &Transform), With<Tile>>,
+    mut q_tiles: Query<(&Transform, &mut Visibility), With<Tile>>,
     mut q_timer: Query<&mut TileTime>,
     time: Res<Time>,
     mut cmds: Commands,
     config: Res<Config>,
+    mut grid: ResMut<Tiles>,
 ) {
     if !config.running {
         return;
@@ -276,59 +290,105 @@ fn move_tiles_system(
     tile_timer.timer.tick(time.delta());
 
     if tile_timer.timer.finished() {
-        let mut tiles = vec![];
+        let mut alive_tiles = HashMap::new();
 
-        for (_, transform) in &q_tiles {
-            tiles.push(transform);
+        for (key, data) in &grid.tiles {
+            if data.alive {
+                alive_tiles.insert(
+                    key.clone(),
+                    Something {
+                        alive: data.alive,
+                        entity: data.entity,
+                    },
+                );
+            }
         }
 
-        for (e, transform) in &q_tiles {
-            let neighbors = tile_neighbors(&transform.translation, &tiles);
+        for (transform, mut visibility) in &mut q_tiles {
+            let neighbors = tile_neighbors(&transform.translation, &alive_tiles);
+            let key = format!("{}:{}", transform.translation.x, transform.translation.y);
+
             if neighbors < 2 || neighbors > 3 {
-                cmds.entity(e).despawn();
+                if let Some(data) = grid.tiles.get_mut(&key) {
+                    data.alive = false;
+                    *visibility = Visibility::Hidden;
+                }
             }
 
-            let dead_tiles = get_dead_tiles(&transform.translation, &tiles);
+            let dead_tiles = get_dead_tiles(&transform.translation, &alive_tiles);
 
             for dt in &dead_tiles {
-                let n = tile_neighbors(dt, &tiles);
+                let n = tile_neighbors(dt, &alive_tiles);
+                let k = format!("{}:{}", dt.x, dt.y);
+
                 if n == 3 {
-                    cmds.spawn((
-                        SpriteBundle {
-                            sprite: Sprite {
-                                color: Color::BLACK,
-                                custom_size: Some(Vec2::new(CELL_SIZE, CELL_SIZE)),
-                                ..default()
+                    if let Some(data) = grid.tiles.get_mut(&k) {
+                        data.alive = true;
+                        cmds.entity(data.entity).insert(Visibility::Visible);
+                    } else {
+                        let entity = cmds
+                            .spawn((
+                                SpriteBundle {
+                                    sprite: Sprite {
+                                        color: Color::BLACK,
+                                        custom_size: Some(Vec2::new(CELL_SIZE, CELL_SIZE)),
+                                        ..default()
+                                    },
+                                    transform: Transform::from_translation(Vec3::new(
+                                        dt.x, dt.y, 0.0,
+                                    )),
+                                    ..default()
+                                },
+                                Tile,
+                            ))
+                            .id();
+                        grid.tiles.insert(
+                            k,
+                            Something {
+                                alive: true,
+                                entity,
                             },
-                            transform: Transform::from_translation(Vec3::new(dt.x, dt.y, 0.0)),
-                            ..default()
-                        },
-                        Tile,
-                    ));
+                        );
+                    }
                 }
             }
         }
     }
 }
 
-fn tile_neighbors(tile: &Vec3, tiles: &Vec<&Transform>) -> i32 {
-    let Vec3 { x, y, z } = tile;
-    let is_pos_equal = |pos| tiles.iter().any(|&&t| t.translation == pos);
+fn tile_neighbors(tile: &Vec3, alive_tiles: &HashMap<String, Something>) -> i32 {
+    let Vec3 { x, y, .. } = tile;
+    let is_pos_alive = |x, y| {
+        let key = format!("{}:{}", x, y);
+        if let Some(data) = alive_tiles.get(&key) {
+            data.alive
+        } else {
+            false
+        }
+    };
 
-    let n = is_pos_equal(Vec3::new(*x, *y + CELL_SIZE, *z)) as i32;
-    let s = is_pos_equal(Vec3::new(*x, *y - CELL_SIZE, *z)) as i32;
-    let w = is_pos_equal(Vec3::new(*x - CELL_SIZE, *y, *z)) as i32;
-    let e = is_pos_equal(Vec3::new(*x + CELL_SIZE, *y, *z)) as i32;
-    let ne = is_pos_equal(Vec3::new(*x + CELL_SIZE, *y + CELL_SIZE, *z)) as i32;
-    let nw = is_pos_equal(Vec3::new(*x - CELL_SIZE, *y + CELL_SIZE, *z)) as i32;
-    let se = is_pos_equal(Vec3::new(*x + CELL_SIZE, *y - CELL_SIZE, *z)) as i32;
-    let sw = is_pos_equal(Vec3::new(*x - CELL_SIZE, *y - CELL_SIZE, *z)) as i32;
+    let n = is_pos_alive(*x, *y + CELL_SIZE) as i32;
+    let s = is_pos_alive(*x, *y - CELL_SIZE) as i32;
+    let w = is_pos_alive(*x - CELL_SIZE, *y) as i32;
+    let e = is_pos_alive(*x + CELL_SIZE, *y) as i32;
+    let ne = is_pos_alive(*x + CELL_SIZE, *y + CELL_SIZE) as i32;
+    let nw = is_pos_alive(*x - CELL_SIZE, *y + CELL_SIZE) as i32;
+    let se = is_pos_alive(*x + CELL_SIZE, *y - CELL_SIZE) as i32;
+    let sw = is_pos_alive(*x - CELL_SIZE, *y - CELL_SIZE) as i32;
 
     n + s + w + e + ne + nw + se + sw
 }
 
-fn get_dead_tiles(tile: &Vec3, live_tiles: &Vec<&Transform>) -> Vec<Vec3> {
+fn get_dead_tiles(tile: &Vec3, alive_tiles: &HashMap<String, Something>) -> Vec<Vec3> {
     let Vec3 { x, y, z } = tile;
+    let is_pos_alive = |x, y| {
+        let key = format!("{}:{}", x, y);
+        if let Some(data) = alive_tiles.get(&key) {
+            data.alive
+        } else {
+            false
+        }
+    };
 
     let neighbors = vec![
         Vec3::new(*x, *y + CELL_SIZE, *z),
@@ -343,7 +403,7 @@ fn get_dead_tiles(tile: &Vec3, live_tiles: &Vec<&Transform>) -> Vec<Vec3> {
 
     neighbors
         .into_iter()
-        .filter(|n| live_tiles.iter().any(|t| t.translation != *n))
+        .filter(|n| !is_pos_alive(n.x, n.y))
         .collect()
 }
 
@@ -352,16 +412,21 @@ fn button_system(
     q_tile_lines: Query<(Entity, &GridLine)>,
     mut cmds: Commands,
     mut config: ResMut<Config>,
+    q_indicator: Query<Entity, With<CursorIndicator>>,
 ) {
     for (e, interaction) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => {
                 cmds.entity(e).despawn_recursive();
-                config.running = true;
 
                 for (e_line, _) in q_tile_lines.iter() {
                     cmds.entity(e_line).despawn();
                 }
+
+                let e_indicator = q_indicator.single();
+                cmds.entity(e_indicator).despawn();
+
+                config.running = true;
             }
             _ => (),
         }
