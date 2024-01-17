@@ -1,31 +1,10 @@
 use std::{collections::HashMap, time::Duration};
 
-use bevy::{
-    core_pipeline::clear_color::ClearColorConfig,
-    prelude::*,
-    render::{
-        settings::{Backends, RenderCreation, WgpuSettings},
-        RenderPlugin,
-    },
-    window::PrimaryWindow,
-};
-
-struct Defaults;
-
-impl Plugin for Defaults {
-    fn build(&self, app: &mut App) {
-        app.add_plugins(DefaultPlugins.set(RenderPlugin {
-            render_creation: RenderCreation::Automatic(WgpuSettings {
-                backends: Some(Backends::VULKAN),
-                ..default()
-            }),
-        }));
-    }
-}
+use bevy::{core_pipeline::clear_color::ClearColorConfig, prelude::*, window::PrimaryWindow};
 
 fn main() {
     App::new()
-        .add_plugins(Defaults)
+        .add_plugins(DefaultPlugins)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
