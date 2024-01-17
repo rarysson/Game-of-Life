@@ -226,6 +226,14 @@ fn place_tile_system(
         return;
     }
 
+    let get_center_offset = |position| {
+        if position > 0.0 {
+            (CELL_SIZE as i32) / 2
+        } else {
+            -(CELL_SIZE as i32) / 2
+        }
+    };
+
     if btn.just_pressed(MouseButton::Left) {
         let x = mouse_position.0.x;
         let y = mouse_position.0.y;
@@ -240,39 +248,49 @@ fn place_tile_system(
             return;
         }
 
-        let get_center_offset = |position| {
-            if position > 0.0 {
-                (CELL_SIZE as i32) / 2
-            } else {
-                -(CELL_SIZE as i32) / 2
-            }
-        };
+        let x = ((x / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(x)) as f32;
+        let y = ((y / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(y)) as f32;
+
+        if let Some(cell) = grid.cells.get_mut(&format!("{}:{}", x, y)) {
+            cell.alive = true;
+            cmds.entity(cell.entity).insert(Visibility::Visible);
+        } else {
+            let entity = cmds
+                .spawn((
+                    SpriteBundle {
+                        sprite: Sprite {
+                            color: Color::BLACK,
+                            custom_size: Some(Vec2::new(CELL_SIZE, CELL_SIZE)),
+                            ..default()
+                        },
+                        transform: Transform::from_translation(Vec3::new(x, y, 0.0)),
+                        ..default()
+                    },
+                    Cell,
+                ))
+                .id();
+
+            grid.cells.insert(
+                format!("{}:{}", x, y),
+                CellData {
+                    alive: true,
+                    entity,
+                },
+            );
+        }
+    }
+
+    if btn.just_pressed(MouseButton::Right) {
+        let x = mouse_position.0.x;
+        let y = mouse_position.0.y;
 
         let x = ((x / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(x)) as f32;
         let y = ((y / CELL_SIZE) as i32 * (CELL_SIZE as i32) + get_center_offset(y)) as f32;
 
-        let entity = cmds
-            .spawn((
-                SpriteBundle {
-                    sprite: Sprite {
-                        color: Color::BLACK,
-                        custom_size: Some(Vec2::new(CELL_SIZE, CELL_SIZE)),
-                        ..default()
-                    },
-                    transform: Transform::from_translation(Vec3::new(x, y, 0.0)),
-                    ..default()
-                },
-                Cell,
-            ))
-            .id();
-
-        grid.cells.insert(
-            format!("{}:{}", x, y),
-            CellData {
-                alive: true,
-                entity,
-            },
-        );
+        if let Some(cell) = grid.cells.get_mut(&format!("{}:{}", x, y)) {
+            cell.alive = false;
+            cmds.entity(cell.entity).insert(Visibility::Hidden);
+        }
     }
 }
 
