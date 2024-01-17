@@ -348,6 +348,20 @@ fn population_system(
                         cell.alive = true;
                         cmds.entity(cell.entity).insert(Visibility::Visible);
                     } else {
+                        let half_width = WINDOW_WIDTH / 2;
+                        if (dead_cell_position.x as i32) < -half_width
+                            || (dead_cell_position.x as i32) > half_width
+                        {
+                            continue;
+                        }
+
+                        let half_height = WINDOW_HEIGHT / 2;
+                        if (dead_cell_position.y as i32) < -half_height
+                            || (dead_cell_position.y as i32) > half_height
+                        {
+                            continue;
+                        }
+
                         let entity = cmds
                             .spawn((
                                 SpriteBundle {
